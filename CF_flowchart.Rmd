@@ -1,0 +1,158 @@
+---
+title: "CF_Flowchart"
+author: "Sooyeong Lim"
+date: "April 24, 2019"
+output: html_document
+---
+# Step by step illustration of data preprocess procedure in CF data
+
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(DiagrammeR)
+rm(list=ls())
+load("C:/Users/LIMK2Z/Desktop/jittered_tobi.RData")
+
+
+```
+
+
+
+
+```{r flowchart, echo=FALSE}
+grViz("digraph flowchart {
+      # node definitions with substituted label text
+      node [fontname = Helvetica, shape = rectangle]        
+      tab1 [label = '@@1']
+      tab2 [label = '@@2']
+      tab3 [label = '@@3']
+      tab4 [label = '@@4']
+      tab5 [label = '@@5']
+      tab6 [label = 'Patients who initially diagnosed chronic p.a infection at age over 21 (n=8,066) \n Patients  who diagnosis chornic p.a infection before age 21 but sum p.a is less than 4(n=14,961)']
+      tab7 [label = 'Patients whose follow up visit is beyond 6-12 month']
+      # edge definitions with the node IDs
+      tab1 -> tab2 -> tab3 -> tab4 
+      tab1->tab5
+      tab2->tab6;
+
+
+      }
+
+      [1]: 'Cystic fibrosis registrar data (n=43,038)'
+      [2]: 'Patients diagnosed as chronic p.a infection (n=38,615)'
+      [3]: 'Patients with chronic p.a infection & cumulative p.a sum >=4 at age less than 21 (n=15,588)'
+      [4]: 'Patients whose follow up visit is within 6-12 month from baseline visit (n=13,720)'
+      [5]: 'Patients who are not diagnoed chronic p.a infection (n=4,423)'
+      ")
+
+
+
+
+```
+
+### 1. Decide Subjects with Chronic P.A Infection
+
+* In the original jittered data, there are 43,038 subjects
+* In this study, we are interested in subjects with chronic p.a infection, and we defined chronic p.a subjects with subjects whose bacterialculturedone>=4. 38615 subjects are considered as chronic P.A infection.
+
+```{r step2}
+## Convert na's in tobi, pa, bacterialculturedone as 0
+jittered_data$bacterialculturedone[is.na(jittered_data$bacterialculturedone)]<-0
+jittered_data$tobi[is.na(jittered_data$tobi)]<-0
+jittered_data$pa[is.na(jittered_data$pa)]<-0
+
+## Define cumulative sum of bacterial culturedone
+step1<-jittered_data %>% 
+  group_by(eDWID) %>% 
+  mutate(cum_bact=cumsum(bacterialculturedone),
+                         cum_tobi=cumsum(tobi),
+                         cum_pa=cumsum(pa))
+# Decide whether the subjects are chornic p.a or not
+
+
+step2<-step1 %>% mutate(culture_pa_gt_4=case_when(cum_bact>=4 & cum_pa>=4~1,
+                                             cum_bact==4 & cum_pa<4~0,
+                                             cum_bact<4 ~0),
+                        chronic_pa=case_when(cum_bact>=4 ~1,
+                                             cum_bact<4 ~0)
+                        )
+#Print out sample observations
+head((step2 %>% select(eDWID, encounterage, chronic_pa,cum_bact,tobi,cum_pa,culture_pa_gt_4)),10)
+# Sort out patients who was never treated as chronic p.a
+# There are 38,615 subjects who was dianosied as chrnoic p.a
+Id_chronic<-step2 %>% group_by(eDWID) %>% filter(row_number()==n() & culture_pa_gt_4==1) %>% select(eDWID)
+
+# count_chronic<-step2 %>% group_by(eDWID) %>% filter(row_number()==n() & chronic_pa==1) %>% select(eDWID)
+# nrow(data.frame(unique(count_chronic$eDWID)))
+# Filter those subjects who was not diagnosied as Chornic p.a & cumsum(pa)<4
+step3<-inner_join(step2, Id_chronic)
+
+```
+
+### 2. Set Baseline
+
+
+* To decide baseline, bacterial culture done>=4 & cumulative pa sum>=4 is required
+
+* There are 15,588 subjects satisfy 6-21 y.o baseline criterion
+
+```{r step_baseline}
+### Select subjects with chroinc_pa==1 & 6<=encounterage<=21
+baseline_step1<-step3 %>% filter(encounterage>=6 & encounterage<=21 & !is.na(FEV1) & culture_pa_gt_4==1)
+
+### FFirst observation from & FEV1 !=NA 
+baseline_step2<-baseline_step1 %>% group_by(eDWID) %>% select(eDWID,FEV1,tobi,encounterage, cum_tobi, culture_pa_gt_4) 
+Id_baseline<-baseline_step2 %>% group_by(eDWID) %>% 
+  filter(row_number()==1) %>% mutate(baseline=1) %>% select(eDWID,encounterage, FEV1,baseline)
+
+
+
+## There are 15,588 subjects which was diagnoised as chronic p.a before 21 yr old.
+nrow(Id_baseline)
+
+## Assign baseline
+step4<-left_join(step3,Id_baseline,by=c('eDWID','encounterage','FEV1'))
+
+### Select subjects who only have a baseline (6 to 21 encounterage)
+step4<-step4 %>% filter(eDWID %in% Id_baseline$eDWID)
+
+### How many subjects don't have a baseline & sort
+base_FEV1<-step4 %>%  filter(baseline==1) %>% group_by(eDWID) %>%
+summarize(baseFEV1=FEV1,baseage=encounterage)
+step5<-left_join(step4,base_FEV1)
+
+```
+
+
+### 3. Set Endpoint
+
+* Assign endpoint with patients who did follow up visit with in 6 to 12 month timeframe
+
+* Remove patients who didn't show up after baseline
+```{r step_endpoint}
+### Decide endpoint
+# Select endpoint btw 6~12 month later from baseline
+end_step1<-step5 %>% group_by(eDWID) %>% 
+  filter(!is.na(FEV1)& encounterage>=baseage+0.5 & encounterage<=baseage+1)
+end_step2<-end_step1 %>% group_by(eDWID) %>% filter(row_number()==1) %>% summarize(endpoint=1, endpointFEV1=FEV1, endpointage=encounterage)
+
+step6<-left_join(step5,end_step2)
+# Filter out subjects with no endpoint  
+step7<-step6 %>% filter(!is.na(endpointage))
+## There are 13,720 subects for analysis
+
+## Since we have baseline & endpoint's FEV1, encounterage drop indicator
+var<-names(step7) %in% c('baseline','endpoint')
+step7<-step7[!var]
+
+
+
+
+save(step7, file="pre_process.Rdata")
+
+
+```
+
+
+
